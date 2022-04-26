@@ -28,7 +28,7 @@ For detailed information about DTrace see the [OpenDTrace Speciﬁcation version
 
 Additional D scripts applicable for Windows scenarios are available in the samples directory of the DTrace source code.
 
-[https://github.com/microsoft/DTrace-on-Windows/tree/master/samples/windows](https://github.com/microsoft/DTrace-on-Windows/tree/master/samples/windows)
+[https://github.com/microsoft/DTrace-on-Windows/tree/windows/samples/windows](https://github.com/microsoft/DTrace-on-Windows/tree/windows/samples/windows)
 
 A set of useful opentrace toolkit scripts is available at [https://github.com/opendtrace/toolkit](https://github.com/opendtrace/toolkit).
 
@@ -38,96 +38,99 @@ A set of useful opentrace toolkit scripts is available at [https://github.com/op
 This script provides the disk counters for a given executable name. The executable name is case sensitive and is provided on the command line when the script is started.
 
 ```dtrace
-
 #pragma D option quiet
 #pragma D option destructive
 
-
-intptr_t curptr;
+PLIST_ENTRY head;
+PLIST_ENTRY curptr;
 struct nt`_EPROCESS *eprocess_ptr;
 int found;
 int firstpass;
+uint64_t bytesread;
+uint64_t byteswrite;
+int readcount;
+int writecount;
+int flushcount;
+
+
 BEGIN
 {
-	curptr = (intptr_t) ((struct nt`_LIST_ENTRY *) (void*)&nt`PsActiveProcessHead)->Flink;	
-	found = 0;
-	firstpass = 1;
-	bytesread = 0;
-	byteswrite = 0;
-	readcount = 0;
-	writecount = 0;
-	flushcount = 0;
+    printf("Looking for process '%s'...\n", $1);
+    head = (PLIST_ENTRY)&nt`PsActiveProcessHead;
+    curptr = head->Flink;
+    found = 0;
+    firstpass = 1;
+    bytesread = 0;
+    byteswrite = 0;
+    readcount = 0;
+    writecount = 0;
+    flushcount = 0;
 }
 
-tick-1ms
-
-/found == 0/
-
+tick-10ms
+/!found/
 {
-/* use this for pointer parsing */
-	if (found == 0)
-	{
-		eprocess_ptr = (struct nt`_EPROCESS *)(curptr - offsetof(nt`_EPROCESS, ActiveProcessLinks));
-		processid = (string) eprocess_ptr->ImageFileName;
+    /* use this for pointer parsing */
+    eprocess_ptr = (struct nt`_EPROCESS *)((intptr_t)curptr - offsetof(nt`_EPROCESS, ActiveProcessLinks));
+    processid = (int) eprocess_ptr->UniqueProcessId;
+    processName = (string)eprocess_ptr->ImageFileName;
 
-		if ($1 == processid)
-		{
-			found = 1;
-		}
-
-		else 
-		{
-			curptr = (intptr_t) ((struct nt`_LIST_ENTRY *) (void*)curptr)->Flink;
-		}
-	}		
+    if ($1 == processName) {
+        found = 1;
+    } else {
+        /*printf("No match on '%s' (%d)\n", processName, processid);*/
+        curptr = curptr->Flink;
+        if (curptr == head) {
+            exit(0);
+        }
+    }
 }
 
-tick-2s
-
+tick-10s
+/!found/
 {
-	system ("cls");
-	if (found == 1)
-	{
-		if (firstpass)
-		{
-			firstpass = 0;
-			bytesread = (unsigned long long) eprocess_ptr->DiskCounters->BytesRead;
-			byteswrite = (unsigned long long) eprocess_ptr->DiskCounters->BytesWritten;
-			readcount = eprocess_ptr->DiskCounters->ReadOperationCount;
-			writecount = eprocess_ptr->DiskCounters->WriteOperationCount;
-			flushcount =  eprocess_ptr->DiskCounters->FlushOperationCount;
-		}
+    exit(0);
+}
 
-		else
-		{
-			bytesread = (unsigned long long)  (eprocess_ptr->DiskCounters->BytesRead - bytesread);
-			byteswrite = (unsigned long long)  (eprocess_ptr->DiskCounters->BytesWritten - byteswrite);
-			readcount = eprocess_ptr->DiskCounters->ReadOperationCount - readcount;
-			writecount = eprocess_ptr->DiskCounters->WriteOperationCount - writecount;		
-			flushcount = eprocess_ptr->DiskCounters->FlushOperationCount - flushcount;
+END
+/!found/
+{
+    printf("No matching process found for %s \n", $1);
+}
 
-			printf("*** Reports disk read/write every second *** \n");
-			printf("Process name: %s\n", eprocess_ptr->ImageFileName);
-			printf("Process Id: %d\n", (int) eprocess_ptr->UniqueProcessId);
-			printf("Bytes Read %llu \n",  (unsigned long long) bytesread);
-			printf("Bytes Written %llu \n", (unsigned long long) byteswrite);
-			printf("Read Operation Count %d \n", readcount);
-			printf("Write Operation Count %d \n",writecount);
-			printf("Flush Operation Count %d \n", flushcount);
+tick-1s
+/found/
+{
+    system("cls");
 
-			bytesread = (unsigned long long) eprocess_ptr->DiskCounters->BytesRead;
-			byteswrite = (unsigned long long) eprocess_ptr->DiskCounters->BytesWritten;
-			readcount = eprocess_ptr->DiskCounters->ReadOperationCount;
-			writecount = eprocess_ptr->DiskCounters->WriteOperationCount;
-			flushcount =  eprocess_ptr->DiskCounters->FlushOperationCount;		
-		}		
-	}
+    self->DiskCounters = eprocess_ptr->DiskCounters;
 
-	else
-	{
-		printf("No matching process found for %s \n", $1);
-		exit(0);
-	}
+    if (firstpass) {
+        firstpass = 0;
+    } else {
+        self->bytesread = self->DiskCounters->BytesRead - bytesread;
+        self->byteswrite = self->DiskCounters->BytesWritten - byteswrite;
+        self->readcount = self->DiskCounters->ReadOperationCount - readcount;
+        self->writecount = self->DiskCounters->WriteOperationCount - writecount;
+        self->flushcount = self->DiskCounters->FlushOperationCount - flushcount;
+
+        printf("*** Reports disk read/write every second *** \n");
+
+        printf("Process name: %s\n", eprocess_ptr->ImageFileName);
+        printf("Process Id: %d\n", (int) eprocess_ptr->UniqueProcessId);
+        printf("Bytes Read %llu \n",  (uint64_t)self->bytesread);
+        printf("Bytes Written %llu \n", (uint64_t)self->byteswrite);
+        printf("Read Operation Count %d \n", self->readcount);
+        printf("Write Operation Count %d \n", self->writecount);
+        printf("Flush Operation Count %d \n", self->flushcount);
+
+    }
+
+    bytesread = self->DiskCounters->BytesRead;
+    byteswrite = self->DiskCounters->BytesWritten;
+    readcount = self->DiskCounters->ReadOperationCount;
+    writecount = self->DiskCounters->WriteOperationCount;
+    flushcount =  self->DiskCounters->FlushOperationCount;
 }
 ```
 
@@ -152,9 +155,7 @@ Bytes Read 18446744073709480960
 Bytes Written 18446744073709522944 
 Read Operation Count -5 
 Write Operation Count -7 
-Flush Operation Count 0 
-
-```
+Flush Operation Count 0 ```
 
 To keep a running log of disk activity redirect the command out to a text file as shown here.
 
@@ -172,36 +173,41 @@ In some diagnostics cases, there is a need to dump kernel structures to understa
 
 tick-3s
 {
-	system ("cls");
+    system ("cls");
 
-	this->pp = ((struct nt`_MI_PARTITION *) &nt`MiSystemPartition);
+    this->Partition = (struct nt`_MI_PARTITION*)&nt`MiSystemPartition;
+    this->Commit = (struct nt`_MI_PARTITION_COMMIT*)&this->Partition->Commit;
 
-	printf("***** Printing System wide page information ******* \n");
-	printf( "Total Pages Entire Node: %u MB \n", this->pp->Core.NodeInformation->TotalPagesEntireNode*4096/(1024*1024));
-	printf("Total Available Pages: %u Mb \n", this->pp->Vp.AvailablePages*4096/(1024*1024));
-	printf("Total ResAvail Pages: %u  Mb \n",  this->pp->Vp.ResidentAvailablePages*4096/(1024*1024));
-	printf("Total Shared Commit: %u  Mb \n",  this->pp->Vp.SharedCommit*4096/(1024*1024));
-	printf("Total Pages for PagingFile: %u  Mb \n",  this->pp->Vp.TotalPagesForPagingFile*4096/(1024*1024));
-	printf("Modified Pages : %u  Mb \n",  this->pp->Vp.ModifiedPageListHead.Total*4096/(1024*1024));
-	printf("Modified No Write Page Count : %u  Mb \n",  this->pp->Vp.ModifiedNoWritePageListHead.Total*4096/(1024*1024));
-	printf("Bad Page Count : %d  Mb \n",  this->pp->PageLists.BadPageListHead.Total*4096/(1024*1024));
-	printf("Zero Page Count : %d  Mb \n",  this->pp->PageLists.ZeroedPageListHead.Total*4096/(1024*1024));
-	printf("Free Page Count : %d  Mb \n",  this->pp->PageLists.FreePageListHead.Total*4096/(1024*1024));
+    printf("***** Printing System wide page information ******* \n");
+    printf( "Total Pages Entire Node: %u MB \n", this->Partition->Core.NodeInformation->TotalPagesEntireNode*4096/(1024*1024));
+    printf("Total Available Pages: %u Mb \n", this->Partition->Vp.AvailablePages*4096/(1024*1024));
+    printf("Total ResAvail Pages: %u  Mb \n", this->Partition->Vp.ResidentAvailablePages*4096/(1024*1024));
+    printf("Total Shared Commit: %u  Mb \n", this->Partition->Vp.SharedCommit*4096/(1024*1024));
+    printf("Total Pages for PagingFile: %u  Mb \n", this->Partition->Vp.TotalPagesForPagingFile*4096/(1024*1024));
+    printf("Modified Pages : %u  Mb \n", this->Partition->Vp.ModifiedPageListHead.Total*4096/(1024*1024));
+    printf("Modified No Write Page Count : %u  Mb \n", this->Partition->Vp.ModifiedNoWritePageListHead.Total*4096/(1024*1024));
+    printf("Bad Page Count : %d  Mb \n", this->Partition->PageLists.BadPageListHead.Total*4096/(1024*1024));
+    printf("Zero Page Count : %d  Mb \n", this->Partition->PageLists.ZeroedPageListHead.Total*4096/(1024*1024));
+    printf("Free Page Count : %d  Mb \n", this->Partition->PageLists.FreePageListHead.Total*4096/(1024*1024));
 
 
-/********** Printing Commit info ******************/ 
-	
-	this->commit = ((struct nt`_MI_PARTITION_COMMIT ) ((struct nt`_MI_PARTITION *) &nt`MiSystemPartition)->Commit);
+    /********** Printing Commit info ******************/
 
-	printf("***** Printing Commit Info ******* \n");
-	printf("Total Committed Pages: %u  Mb \n", this->pp->Vp.TotalCommittedPages*4096/(1024*1024));
-	printf("Total Commit limit: %u  Mb  \n", this->pp->Vp.TotalCommitLimit*4096/(1024*1024));
-	printf("Peak Commitment: %u Mb \n", this->commit.PeakCommitment*4096/(1024*1024));
-	printf("Low Commit Threshold: %u Mb \n", this->commit.LowCommitThreshold*4096/(1024*1024));
-	printf("High Commit Threshold: %u Mb \n", this->commit.HighCommitThreshold*4096/(1024*1024));
-	printf("System Commit Reserve: %u Mb \n", this->commit.SystemCommitReserve*4096/(1024*1024));
-	
+    printf("***** Printing Commit Info ******* \n");
+    printf("Total Committed Pages: %u  Mb \n", this->Partition->Vp.TotalCommittedPages*4096/(1024*1024));
+    printf("Total Commit limit: %u  Mb  \n", this->Partition->Vp.TotalCommitLimit*4096/(1024*1024));
+    printf("Peak Commitment: %u Mb \n", this->Commit->PeakCommitment*4096/(1024*1024));
+    printf("Low Commit Threshold: %u Mb \n", this->Commit->LowCommitThreshold*4096/(1024*1024));
+    printf("High Commit Threshold: %u Mb \n", this->Commit->HighCommitThreshold*4096/(1024*1024));
+    printf("System Commit Reserve: %u Mb \n", this->Commit->SystemCommitReserve*4096/(1024*1024));
 
+
+    printf("******** Gathering details for Partition %d *********\n", this->Partition->Vp.PartitionWs[0].PartitionId);
+    printf("Total WorkingSet Size: %u  Mb \n", this->Partition->Vp.PartitionWs[0].WorkingSetSize*4096/(1024*1024));
+    printf("Total Page Fault Count: %u  Mb \n", this->Partition->Vp.PartitionWs[0].PageFaultCount*4096/(1024*1024));
+    printf("Total Hard Fault Count: %u  Mb \n", this->Partition->Vp.PartitionWs[0].HardFaultCount*4096/(1024*1024));
+    printf("Total WorkingSet Leaf Size: %u  Mb  \n", this->Partition->Vp.PartitionWs[0].WorkingSetLeafSize*4096/(1024*1024));
+    printf("Trimmed Page Count: %u  Mb \n", this->Partition->Vp.PartitionWs[0].TrimmedPageCount*4096/(1024*1024));
 }
 ```
 
